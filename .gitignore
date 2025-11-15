@@ -1,0 +1,11 @@
+bots-env/
+__pycache__/
+tmp/
+*.mp4
+*.webm
+*.log
+.env
+*.env
+*.pyc
+.vscode/
+.idea/
