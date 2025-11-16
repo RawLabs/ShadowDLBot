@@ -79,7 +79,7 @@ def _build_caption(title: str, url: str, platform: str, duration: int | float) -
         f"Duration: {duration_text}\n\n"
         "Credits: All rights remain with the original creator and hosting platform.\n"
         "This bot only fetches already-public content for personal offline viewing.\n\n"
-        "Hosted & paid by: RCD\n"
+        "Hosted & paid by: Raw Cast [Digital] t.me/rawcastdigital\n"
         "Downloader engine: yt-dlp (supports many public sites such as YouTube, TikTok, "
         "X/Twitter, Instagram, Reddit, Vimeo, and more).\n\n"
         f"{stats_block}"
