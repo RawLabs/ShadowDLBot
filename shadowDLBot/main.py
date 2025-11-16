@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 TOTAL_DOWNLOADS = 0
 PLATFORM_COUNTS = Counter()
 URL_REGEX = r"https?://\S+"
+OVERRIDE_PASSCODE = "80085"
+AUTHORIZED_OVERRIDE_USERS: set[int] = set()
 
 
 def _extract_url_from_replied_message(update: Update) -> Optional[str]:
@@ -124,8 +126,11 @@ async def grab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await message.reply_text("Got it — downloading a safe-size 360p copy…")
 
+    user_id = message.from_user.id if message.from_user else None
+    allow_long = bool(user_id and user_id in AUTHORIZED_OVERRIDE_USERS)
+
     try:
-        result = download_video(url)
+        result = download_video(url, allow_long=allow_long)
     except DownloadValidationError as exc:
         await message.reply_text(str(exc))
         return
@@ -140,6 +145,18 @@ async def grab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not file_path.exists():
         await message.reply_text("Download failed unexpectedly; please try again.")
         return
+
+    transcript_files: list[tuple[Path, str]] = []
+    transcript_with_ts = result.get("transcript_with_timestamps")
+    transcript_plain = result.get("transcript_plain")
+    if transcript_with_ts:
+        transcript_files.append(
+            (Path(transcript_with_ts), "Transcript (with timestamps)")
+        )
+    if transcript_plain:
+        transcript_files.append(
+            (Path(transcript_plain), "Transcript (paragraphs)")
+        )
 
     size_bytes = file_path.stat().st_size
     logger.info("Sending file %s (%d bytes) for %s", file_path, size_bytes, url)
@@ -186,10 +203,65 @@ async def grab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except OSError:
         logger.warning("Could not delete temporary file %s", file_path)
 
+    for transcript_path, label in transcript_files:
+        try:
+            if file_sent and transcript_path.exists():
+                await message.reply_document(
+                    document=_make_input_file(transcript_path),
+                    caption=label,
+                    read_timeout=120,
+                    write_timeout=120,
+                )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Failed to send transcript file %s", transcript_path)
+        finally:
+            try:
+                transcript_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not delete transcript file %s", transcript_path)
+
     if not file_sent:
         # Roll back stats because user never received the file.
         TOTAL_DOWNLOADS = max(TOTAL_DOWNLOADS - 1, 0)
         PLATFORM_COUNTS[platform] = max(PLATFORM_COUNTS[platform] - 1, 0)
+
+
+async def override(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow trusted users (via passcode) to bypass duration limits."""
+
+    message = update.message
+    if not message:
+        return
+
+    chat = message.chat
+    if not chat or chat.type != "private":
+        await message.reply_text(
+            "Please DM me and run /override there to manage passcode access."
+        )
+        return
+
+    user = message.from_user
+    if not user:
+        return
+
+    args = context.args or []
+    if args and args[0].lower() in {"off", "disable", "stop"}:
+        AUTHORIZED_OVERRIDE_USERS.discard(user.id)
+        await message.reply_text("Override disabled. Duration limits restored.")
+        return
+
+    if not args:
+        await message.reply_text("Usage: /override <passcode>\nSend '/override off' to disable.")
+        return
+
+    code = args[0]
+    if code == OVERRIDE_PASSCODE:
+        AUTHORIZED_OVERRIDE_USERS.add(user.id)
+        await message.reply_text(
+            "Override enabled. Your future /grab requests will ignore duration limits."
+        )
+    else:
+        await message.reply_text("Invalid passcode.")
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,7 +286,6 @@ def main() -> None:
         connect_timeout=20,
         read_timeout=300,
         write_timeout=300,
-        media_write_timeout=300,
         pool_timeout=60,
     )
 
@@ -228,6 +299,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("grab", grab))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("override", override))
 
     application.run_polling(close_loop=False)
 

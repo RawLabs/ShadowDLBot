@@ -10,17 +10,24 @@ This will:
 - Confirm file exists
 """
 
-from downloader.core import download_video
-import sys
 import os
+import sys
+
+from downloader.core import download_video
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python test_downloader.py <video_url>")
+    args = sys.argv[1:]
+    if not args:
+        print("Usage: python test_downloader.py <video_url> [--allow-long]")
         return
 
-    url = sys.argv[1]
-    result = download_video(url)
+    allow_long = False
+    if "--allow-long" in args:
+        allow_long = True
+        args.remove("--allow-long")
+
+    url = args[0]
+    result = download_video(url, allow_long=allow_long)
 
     print("Title:", result["title"])
     print("Duration:", result["duration"], "seconds")

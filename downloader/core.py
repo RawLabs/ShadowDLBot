@@ -14,17 +14,42 @@ The high-level workflow implemented in :func:`download_video` is:
 
 from __future__ import annotations
 
+import logging
+import re
 import subprocess
+import uuid
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
+import httpx
 import yt_dlp
 
 from downloader import config
 
 BOT_SOFT_LIMIT_BYTES = int(49.0 * 1024 * 1024)  # ~49 MB
 BOT_HARD_LIMIT_BYTES = int(49.6 * 1024 * 1024)  # ~49.6 MB
+TRANSCRIPT_LANG_PRIORITY = (
+    "en",
+    "en-US",
+    "en-GB",
+    "en-CA",
+    "en-AU",
+    "en-IN",
+)
+TRANSCRIPT_EXT_PRIORITY = ("srt", "vtt", "srv3")
+SUPPORTED_TRANSCRIPT_EXTS = set(TRANSCRIPT_EXT_PRIORITY)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
 
 
 class DownloadValidationError(ValueError):
@@ -77,21 +102,35 @@ def _select_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
 
     filtered = [fmt for fmt in mp4_video if 240 <= fmt.get("height", 0) <= 360]
 
-    if not filtered:
-        raise DownloadValidationError("No MP4 video between 240 and 360p was found.")
-
     def size_of(fmt: dict[str, Any]) -> float:
         size = fmt.get("filesize") or fmt.get("filesize_approx")
         return float(size) if isinstance(size, (int, float)) else float("inf")
 
-    under_soft_cap = [
-        fmt for fmt in filtered if size_of(fmt) <= config.SOFT_TARGET_BYTES
-    ]
+    def pick_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        under_soft_cap = [
+            fmt for fmt in candidates if size_of(fmt) <= config.SOFT_TARGET_BYTES
+        ]
+        pool = under_soft_cap if under_soft_cap else candidates
+        pool = sorted(pool, key=size_of)
+        return pool[0]
 
-    candidates = under_soft_cap if under_soft_cap else filtered
-    candidates = sorted(candidates, key=size_of)
+    if filtered:
+        return pick_candidate(filtered)
 
-    return candidates[0]
+    # Fallback: pick the smallest allowed MP4, even if height is outside 240-360p.
+    # TikTok videos are often short, so we trust the Telegram transcode step to
+    # shrink them if needed.
+    if mp4_video:
+        sorted_by_height = sorted(
+            mp4_video,
+            key=lambda fmt: (
+                fmt.get("height") if isinstance(fmt.get("height"), int) else float("inf"),
+                size_of(fmt),
+            ),
+        )
+        return pick_candidate(sorted_by_height)
+
+    raise DownloadValidationError("No compatible MP4 formats were returned.")
 
 
 def _download(url: str, format_id: str, temp_dir: Path) -> Dict[str, Any]:
@@ -178,7 +217,227 @@ def _transcode_for_bot(file_path: Path, duration: int | float) -> Path:
     return out_path
 
 
-def download_video(url: str) -> dict:
+def _pick_entry_for_language(entries: Sequence[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not isinstance(entries, Sequence):
+        return None
+    normalized = [entry for entry in entries if isinstance(entry, dict)]
+    for ext in TRANSCRIPT_EXT_PRIORITY:
+        for entry in normalized:
+            entry_ext = (entry.get("ext") or "").lower()
+            if entry_ext == ext and entry.get("url"):
+                return entry
+    for entry in normalized:
+        entry_ext = (entry.get("ext") or "").lower()
+        if entry_ext in SUPPORTED_TRANSCRIPT_EXTS and entry.get("url"):
+            return entry
+    return None
+
+
+def _pick_language_track(tracks: Dict[str, Any]) -> Optional[dict[str, Any]]:
+    if not isinstance(tracks, dict):
+        return None
+    for lang in TRANSCRIPT_LANG_PRIORITY:
+        entry = _pick_entry_for_language(tracks.get(lang) or [])
+        if entry:
+            return entry
+    for entries in tracks.values():
+        entry = _pick_entry_for_language(entries or [])
+        if entry:
+            return entry
+    return None
+
+
+def _select_transcript_entry(info: Dict[str, Any]) -> Optional[dict[str, Any]]:
+    for key in ("subtitles", "automatic_captions"):
+        tracks = info.get(key) or {}
+        entry = _pick_language_track(tracks)
+        if entry:
+            return entry
+    return None
+
+
+def _timestamp_to_seconds(value: str) -> float:
+    value = (value or "").strip().replace(",", ".")
+    if not value:
+        return 0.0
+    parts = value.split(":")
+    total = 0.0
+    for part in parts:
+        try:
+            number = float(part)
+        except ValueError:
+            return 0.0
+        total = total * 60 + number
+    return total
+
+
+def _clean_caption_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+_TIME_RANGE_RE = re.compile(
+    r"(?P<start>[0-9:\.,]+)\s*-->\s*(?P<end>[0-9:\.,]+)", re.IGNORECASE
+)
+
+
+def _parse_srt_vtt_segments(content: str) -> List[TranscriptSegment]:
+    segments: List[TranscriptSegment] = []
+    raw = (content or "").replace("\r\n", "\n")
+    blocks: List[List[str]] = []
+    current: List[str] = []
+    for line in raw.split("\n"):
+        stripped = line.strip("\ufeff")
+        if stripped.strip() == "":
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append(stripped)
+    if current:
+        blocks.append(current)
+
+    for lines in blocks:
+        if not lines:
+            continue
+        idx = 0
+        if lines[idx].strip().upper().startswith("WEBVTT"):
+            continue
+        if re.fullmatch(r"\d+", lines[idx].strip()):
+            idx += 1
+        while idx < len(lines) and "-->" not in lines[idx]:
+            idx += 1
+        if idx >= len(lines):
+            continue
+        match = _TIME_RANGE_RE.search(lines[idx])
+        if not match:
+            continue
+        idx += 1
+        text = " ".join(line.strip() for line in lines[idx:])
+        cleaned = _clean_caption_text(text)
+        if not cleaned:
+            continue
+        start = _timestamp_to_seconds(match.group("start"))
+        end = _timestamp_to_seconds(match.group("end"))
+        segments.append(TranscriptSegment(start=start, end=end, text=cleaned))
+    return segments
+
+
+def _parse_srv3_segments(content: str) -> List[TranscriptSegment]:
+    segments: List[TranscriptSegment] = []
+    try:
+        root = ET.fromstring(content or "")
+    except ET.ParseError:
+        return segments
+    for node in root.iter("p"):
+        start_ms = float(node.attrib.get("t", "0") or 0.0)
+        duration_ms = float(node.attrib.get("d", "0") or 0.0)
+        start = start_ms / 1000.0
+        duration = duration_ms / 1000.0 if duration_ms else 2.0
+        end = start + duration
+        text = "".join(node.itertext())
+        cleaned = _clean_caption_text(text)
+        if cleaned:
+            segments.append(TranscriptSegment(start=start, end=end, text=cleaned))
+    return segments
+
+
+def _parse_transcript_content(content: str, ext: str) -> List[TranscriptSegment]:
+    ext = (ext or "").lower()
+    if ext in {"srt", "vtt"}:
+        return _parse_srt_vtt_segments(content)
+    if ext == "srv3":
+        return _parse_srv3_segments(content)
+    return []
+
+
+def _format_transcript_timestamp(seconds: float) -> str:
+    total = max(int(seconds), 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _build_timestamp_lines(segments: Sequence[TranscriptSegment]) -> str:
+    lines = [
+        f"[{_format_transcript_timestamp(segment.start)}] {segment.text}"
+        for segment in segments
+    ]
+    return "\n".join(lines)
+
+
+def _build_paragraph_text(segments: Sequence[TranscriptSegment]) -> str:
+    paragraphs: List[str] = []
+    current: List[str] = []
+    prev_end: Optional[float] = None
+    for segment in segments:
+        text = segment.text
+        if not text:
+            continue
+        gap = segment.start - prev_end if prev_end is not None else 0
+        should_break = gap >= 6.0 or (
+            current and current[-1].rstrip().endswith((".", "!", "?")) and len(
+                " ".join(current)
+            )
+            >= 240
+        )
+        if should_break and current:
+            paragraphs.append(" ".join(current))
+            current = []
+        current.append(text)
+        prev_end = segment.end if segment.end > segment.start else segment.start
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs)
+
+
+def _write_transcript_files(
+    base_name: str, segments: Sequence[TranscriptSegment]
+) -> dict[str, Path]:
+    if not segments:
+        return {}
+    safe_base = re.sub(r"[^A-Za-z0-9._-]", "_", base_name or "") or "transcript"
+    unique_suffix = uuid.uuid4().hex[:8]
+    timestamp_path = config.TEMP_DIR / f"{safe_base}.{unique_suffix}.timestamps.txt"
+    clean_path = config.TEMP_DIR / f"{safe_base}.{unique_suffix}.clean.txt"
+    timestamp_path.write_text(_build_timestamp_lines(segments), encoding="utf-8")
+    clean_text = _build_paragraph_text(segments)
+    clean_path.write_text(clean_text, encoding="utf-8")
+    return {"timestamped": timestamp_path, "plain": clean_path}
+
+
+def _maybe_create_transcripts(info: Dict[str, Any], base_name: str) -> dict[str, Path]:
+    try:
+        entry = _select_transcript_entry(info)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("Failed to select transcript track.")
+        return {}
+    if not entry:
+        return {}
+    url = entry.get("url")
+    ext = (entry.get("ext") or "").lower()
+    if not url or ext not in SUPPORTED_TRANSCRIPT_EXTS:
+        return {}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        )
+    }
+    try:
+        response = httpx.get(url, timeout=30, headers=headers)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning("Transcript download failed: %s", exc)
+        return {}
+    segments = _parse_transcript_content(response.text, ext)
+    if not segments:
+        return {}
+    return _write_transcript_files(base_name, segments)
+
+
+def download_video(url: str, *, allow_long: bool = False) -> dict:
     """
     Implement the downloader logic described in the module docstring.
     Use yt-dlp.
@@ -189,7 +448,7 @@ def download_video(url: str) -> dict:
     duration = info.get("duration")
     if not isinstance(duration, (int, float)):
         raise DownloadValidationError("Missing duration information.")
-    if duration > config.MAX_DURATION_SECONDS:
+    if not allow_long and duration > config.MAX_DURATION_SECONDS:
         raise DownloadValidationError("Video is too long.")
 
     raw_formats = info.get("formats") or []
@@ -207,17 +466,30 @@ def download_video(url: str) -> dict:
 
     size_bytes = file_path.stat().st_size
     if size_bytes > config.HARD_CAP_BYTES:
-        file_path.unlink(missing_ok=True)
-        raise DownloadValidationError("Downloaded file exceeds the hard cap.")
+        if allow_long:
+            logger.info(
+                "Override enabled: continuing despite raw size %.2f MB (> hard cap).",
+                size_bytes / (1024 * 1024),
+            )
+        else:
+            file_path.unlink(missing_ok=True)
+            raise DownloadValidationError("Downloaded file exceeds the hard cap.")
 
     file_path = _transcode_for_bot(file_path, duration)
     size_bytes = file_path.stat().st_size
 
     platform = urlparse(url).hostname or "unknown"
+    transcript_paths = _maybe_create_transcripts(info, file_path.stem)
     return {
         "file_path": str(file_path),
         "title": info.get("title") or result.get("title") or "Untitled",
         "duration": int(duration),
         "platform": platform,
         "filesize_bytes": size_bytes,
+        "transcript_with_timestamps": str(transcript_paths["timestamped"])
+        if transcript_paths.get("timestamped")
+        else None,
+        "transcript_plain": str(transcript_paths["plain"])
+        if transcript_paths.get("plain")
+        else None,
     }
