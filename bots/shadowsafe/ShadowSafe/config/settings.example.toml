@@ -1,0 +1,19 @@
+# ShadowSafe reference configuration (no secrets inside).
+
+log_retention_days = 3
+max_file_size_mb = 200
+enable_sanitized_copy = true
+hash_blocklist_url = ""
+temp_directory = "/tmp/shadowsafe"
+enable_file_logging = true
+verdict_thresholds = { green = 0, yellow = 3, red = 6 }
+
+[telegram]
+# BOT_TOKEN must be provided through an environment variable at runtime.
+proxy_url = ""
+allowed_user_ids = []
+
+[privacy]
+delete_files_after_seconds = 30
+allow_remote_scanners = false
+keep_hash_history = false

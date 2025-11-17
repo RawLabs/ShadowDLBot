@@ -1,56 +1,55 @@
-# TGbots Downloader Bot
+# TGbots Workspace
 
-This repository contains a lightweight Telegram bot that downloads size‑constrained public videos using `yt-dlp` and then serves them back from the bot account. The implementation enforces strict duration/height/file-size rules and automatically re-encodes large downloads so they stay below Telegram's 50 MB bot limit.
+A single workspace for multiple Telegram bots plus their helper scripts. Each bot now lives in its own folder so you can focus on one project at a time without digging through unrelated files.
 
-## Requirements
+## Layout
+- `bots/` – all bot projects. Each folder contains its own code, docs, and supporting files.
+  - `shadowDLBot/` – Downloader bot + `downloader/` helper, tmp directory, requirements, and tests (see `bots/shadowDLBot/README.md`).
+  - `shadowpi/` – CAS-aware moderator bot (see `bots/shadowpi/README.md`) with `shadowpi_data/` alongside for the SQLite DB.
+  - `shadowpi_data/` – persistent data directory used by ShadowPI (keep the path mounted when deploying).
+  - `shadowsafe/` – ShadowSafe project files.
+  - `tictocdoc/` – other TikTok tooling/bot.
+  - `transkrypt/` – transcript-to-PDF bot built in this session (see `bots/transkrypt/README.md`).
+- `bots-env/` – shared Python virtual environment for local development.
+- `media/` – loose downloads (captions, mp4s) that don't belong to a specific bot yet.
+- `shared/` – staging area for future shared utilities. (Currently empty.)
 
-- Python 3.10+
-- `ffmpeg` available on `PATH` (used for the post-download transcode step)
-- The Python packages listed in `requirements.txt`
+## Working on a Bot
+1. Activate the shared environment (only once per shell):
+   ```bash
+   source bots-env/bin/activate
+   ```
+2. Change into the bot folder you want (e.g. `cd bots/transkrypt`).
+3. Follow that bot's README for setup, env vars, and run commands.
 
-## Setup
+Each bot keeps its own requirements/documentation so they can evolve independently. When you add a new bot, drop it under `bots/` and update this README with a short description.
+
+## Starting every bot at once
+1. Copy `.env.example` to `.env` and paste the real tokens:
+   ```bash
+   cp .env.example .env
+   # edit .env with your SHADOWDL/SHADOWPI/TRANSKRYPT/SHADOWSAFE/TICTOCDOC tokens
+   ```
+
+Prefer not to store tokens on disk? Export them for the current shell only:
 
 ```bash
-python -m venv bots-env
-source bots-env/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+export SHADOWDL_TELEGRAM_BOT_TOKEN=...
+export SHADOWPI_BOT_TOKEN=...
+export TRANSKRYPT_TELEGRAM_BOT_TOKEN=...
+export SHADOWSAFE_BOT_TOKEN=...
+export TICTOCDOC_BOT_TOKEN=...
+python scripts/start_all.py
 ```
 
-Export your bot token before running:
+2. Activate the shared venv and install each bot's requirements (once).
+3. Launch all bots (runs them in parallel and writes logs to `./logs/<bot>.log`):
+   ```bash
+   source bots-env/bin/activate
+   python scripts/start_all.py
+   ```
+   Press `Ctrl+C` to stop every process cleanly. To run a single bot, `cd` into its folder and start it manually as documented in its README.
 
-```bash
-export TELEGRAM_BOT_TOKEN="1234567890:ABC..."
-```
 
-## Running the bot
-
-```bash
-python -m shadowDLBot.main
-```
-
-The bot exposes the following commands:
-
-- `/start` – show usage instructions.
-- `/grab` – **must** be sent as a reply to a message containing a public video link. The bot validates the URL, downloads a <=360p version, transcodes it if necessary, and replies with the file plus stats.
-- `/stats` – prints cumulative totals per platform for the current process.
-
-All temporary media is stored in `tmp/` and is removed after each successful upload. Counters are kept in memory only (they reset when the process restarts).
-
-## Downloader module
-
-`downloader/core.py` exposes `download_video(url)` which performs:
-
-1. Host validation using `downloader/config.py`.
-2. Metadata extraction via `yt-dlp`.
-3. Format selection (MP4, 240‑360p, H.264/AAC).
-4. Enforced duration, height, soft/hard byte limits.
-5. Optional ffmpeg transcode to keep the final size under ~49 MB for Telegram uploads.
-
-You can import and reuse this helper outside the bot if desired.
-
-## Testing / Development Tips
-
-- Run the bot inside the virtual environment so it can access the installed dependencies and environment variables.
-- Use a test Telegram chat and reply to a message containing a video link when issuing `/grab`.
-- Watch the console logs; the bot logs every download attempt, including the file size it is about to upload, which is helpful when diagnosing timeout issues.
+## Monitoring logs the easy way
+Run `python scripts/watch_logs.py` (add `--show-http` if you really want Telegram polling noise). The watcher tails every `logs/*.log`, filters out the httpx chatter, and colorizes warnings/errors so issues stand out immediately.

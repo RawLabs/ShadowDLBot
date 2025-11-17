@@ -1,0 +1,1 @@
+"""ShadowSafe package."""
