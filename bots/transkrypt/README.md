@@ -3,8 +3,8 @@
 A Telegram bot that downloads video transcripts (via `yt-dlp`), keeps the original timestamps, and also produces a polished paragraph-style summary. Both versions are bundled into a single PDF so users always receive one document containing the raw+human-friendly views.
 
 ## Features
-- `/skrypt` command works directly or in reply to a message that contains a link.
-- Accepts forwarded posts or direct messages that include a video URL (YouTube and any source supported by `yt-dlp`).
+- `/skrypt` command works directly or in reply to a message that contains a link (forwards included).
+- Explicit command usage means the bot never reacts to links unless the user asks it to.
 - Automatically cleans caption text, builds timestamped lines, and groups sentences into readable paragraphs.
 - Generates a lightweight PDF (no extra dependencies) with metadata, the timestamped transcript, and the polished version.
 - Stores generated PDFs inside `output/` so the bot can re-upload or audit transcripts later.
@@ -28,7 +28,6 @@ A Telegram bot that downloads video transcripts (via `yt-dlp`), keeps the origin
    - `/start` shows basic instructions.
    - `/skrypt <link>` runs directly in any chat.
    - Reply to a message (or forwarded post) that has a video link with `/skrypt`.
-   - Send/forward a link to the bot in a private chat without any command; it will pick it up automatically.
 
 All finished transcripts will be saved as `output/<video-id>-<sanitized-title>.pdf` and sent back to the chat.
 

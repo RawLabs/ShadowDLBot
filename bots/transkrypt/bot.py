@@ -9,14 +9,7 @@ from typing import Iterable, Optional
 
 from telegram import Message, MessageEntity, Update
 from telegram.constants import MessageEntityType
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from transkrypt import TranscriptError, TranscriptPDFBuilder, TranscriptService
 
@@ -41,9 +34,6 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("skrypt", skrypt))
 
-    link_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
-    application.add_handler(MessageHandler(link_filter, direct_link_handler))
-
     logger.info("Bot is running. Waiting for updates...")
     application.run_polling(drop_pending_updates=True)
 
@@ -63,15 +53,6 @@ async def skrypt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             "I did not see a link. Use /skrypt <url> or reply to a message that contains one."
         )
-        return
-    await process_transcript_request(update, context, url)
-
-
-async def direct_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    url = extract_url(update, context)
-    if not url:
-        return
-    if update.message and update.message.text and update.message.text.startswith("/"):
         return
     await process_transcript_request(update, context, url)
 
