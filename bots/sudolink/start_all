@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if [ -f .env ]; then
+  set -a
+  # load env vars for local runs; .env stays outside repo history per .gitignore
+  . ./.env
+  set +a
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required to start SudoLink" >&2
+  exit 1
+fi
+
+exec python3 -m sudolink "$@"

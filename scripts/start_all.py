@@ -160,6 +160,15 @@ def build_bot_configs() -> list[BotRunner]:
                 "TICTOCDOC_TEMP_DIR": str((ROOT / "bots" / "tictocdoc" / "tmp").resolve()),
             },
         ),
+        BotConfig(
+            name="SudoLink",
+            command=["./start_all"],
+            cwd=ROOT / "bots" / "sudolink",
+            env_map={
+                "SUDOLINK_TELEGRAM_BOT_TOKEN": "SUDOLINK_TELEGRAM_BOT_TOKEN",
+                "SUDOLINK_OPENAI_API_KEY": "SUDOLINK_OPENAI_API_KEY",
+            },
+        ),
     ]
     return [
         BotRunner(config=bot, log_path=LOG_DIR / f"{bot.name}.log")
