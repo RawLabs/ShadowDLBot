@@ -11,7 +11,9 @@ from telegram.error import TelegramError
 from .config import Settings
 from .database import Database
 
-REFRESH_DELETED_AFTER = 3 * 24 * 3600  # refresh stale entries
+PROGRESS_STEP = 5
+
+
 
 
 @dataclass(slots=True)
@@ -185,15 +187,9 @@ async def run_member_sweep(
     stats.total_members = len(profiles)
 
     for index, profile in enumerate(profiles, start=1):
-        last_seen = int(profile.get("last_seen") or 0)
-        needs_refresh = (
-            bot
-            and not profile.get("is_deleted")
-            and (assessor.now - last_seen) >= REFRESH_DELETED_AFTER
-        )
-        if needs_refresh:
+        if bot and not profile.get("is_deleted"):
             profile = await _refresh_deleted_status(bot, chat_id, profile, db)
-        if progress_callback and (index == stats.total_members or index % 15 == 0):
+        if progress_callback and (index == stats.total_members or index % PROGRESS_STEP == 0):
             await progress_callback(index, stats.total_members)
         risk = assessor.assess(profile)
 
