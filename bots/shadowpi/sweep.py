@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from telegram.error import TelegramError
 
 from .config import Settings
 from .database import Database
@@ -68,6 +69,16 @@ class SweepStats:
         _append_section("Silent watchers", self.silent_watchers)
 
         return "\n".join(lines)
+
+
+def _user_is_deleted(user: Any) -> bool:
+    if not user:
+        return False
+    if getattr(user, "is_deleted", False):
+        return True
+    first = getattr(user, "first_name", "")
+    username = getattr(user, "username", None)
+    return first == "Deleted Account" and not username
 
 
 class MemberRiskAssessor:
@@ -158,6 +169,7 @@ async def run_member_sweep(
     *,
     db: Database,
     settings: Settings,
+    bot: Any | None = None,
     mode: str = "report",
     limit: int | None = None,
     ban_callback=None,
@@ -170,6 +182,8 @@ async def run_member_sweep(
     stats.total_members = len(profiles)
 
     for profile in profiles:
+        if bot and not profile.get("is_deleted"):
+            profile = await _refresh_deleted_status(bot, chat_id, profile, db)
         risk = assessor.assess(profile)
 
         if risk.is_deleted:
@@ -197,3 +211,24 @@ async def run_member_sweep(
             stats.actions_taken += 1
 
     return stats
+
+
+async def _refresh_deleted_status(bot, chat_id: int, profile: dict[str, Any], db: Database) -> dict[str, Any]:
+    try:
+        member = await bot.get_chat_member(chat_id, profile.get("user_id"))
+    except TelegramError:
+        return profile
+    user = getattr(member, "user", None)
+    if not user:
+        return profile
+    if _user_is_deleted(user):
+        return db.record_user_seen(
+            user.id,
+            user.username,
+            chat_id,
+            int(time.time()),
+            full_name=user.full_name,
+            is_deleted=True,
+        )
+    return profile
+

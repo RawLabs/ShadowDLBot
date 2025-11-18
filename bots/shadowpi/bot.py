@@ -546,6 +546,7 @@ async def sweep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         chat.title or str(chat.id),
         db=db,
         settings=settings,
+        bot=context.bot,
         mode=mode,
         limit=limit,
         ban_callback=ban_member if mode != "report" else None,
