@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
 
 from telegram.error import TelegramError
 
 from .config import Settings
 from .database import Database
+
+REFRESH_DELETED_AFTER = 3 * 24 * 3600  # refresh stale entries
 
 
 @dataclass(slots=True)
@@ -174,6 +176,7 @@ async def run_member_sweep(
     limit: int | None = None,
     ban_callback=None,
     shadowban_callback=None,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ) -> SweepStats:
     assessor = MemberRiskAssessor(settings)
     stats = SweepStats(chat_title=chat_title)
@@ -181,9 +184,17 @@ async def run_member_sweep(
     profiles = db.users_by_chat(chat_id, limit)
     stats.total_members = len(profiles)
 
-    for profile in profiles:
-        if bot and not profile.get("is_deleted"):
+    for index, profile in enumerate(profiles, start=1):
+        last_seen = int(profile.get("last_seen") or 0)
+        needs_refresh = (
+            bot
+            and not profile.get("is_deleted")
+            and (assessor.now - last_seen) >= REFRESH_DELETED_AFTER
+        )
+        if needs_refresh:
             profile = await _refresh_deleted_status(bot, chat_id, profile, db)
+        if progress_callback and (index == stats.total_members or index % 15 == 0):
+            await progress_callback(index, stats.total_members)
         risk = assessor.assess(profile)
 
         if risk.is_deleted:
@@ -209,6 +220,9 @@ async def run_member_sweep(
             await shadowban_callback(profile["user_id"])
             stats.shadowbans_applied += 1
             stats.actions_taken += 1
+
+    if progress_callback and stats.total_members:
+        await progress_callback(stats.total_members, stats.total_members)
 
     return stats
 

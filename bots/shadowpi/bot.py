@@ -522,6 +522,22 @@ async def sweep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Sweeping members ({mode})… this may take a while."
     )
 
+    last_update = time.monotonic()
+
+    async def report_progress(done: int, total: int) -> None:
+        nonlocal last_update
+        if not total:
+            return
+        now = time.monotonic()
+        if done == total or now - last_update >= 1.5:
+            try:
+                await progress.edit_text(
+                    f"Sweeping members ({mode})… {done}/{total} scanned."
+                )
+            except TelegramError:
+                pass
+            last_update = now
+
     async def ban_member(user_id: int, reason: str) -> None:
         try:
             await context.bot.ban_chat_member(chat.id, user_id)
@@ -551,6 +567,7 @@ async def sweep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         limit=limit,
         ban_callback=ban_member if mode != "report" else None,
         shadowban_callback=shadowban_member if mode != "report" else None,
+        progress_callback=report_progress,
     )
 
     await progress.edit_text(stats.as_text())
